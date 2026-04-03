@@ -7,6 +7,7 @@ and date/location metadata from album page images.
 
 Accepts a file or directory as input. Processes pages in parallel.
 """
+from __future__ import annotations
 
 import argparse
 import base64
@@ -21,6 +22,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+
+import xml.sax.saxutils
 
 import piexif
 from openai import OpenAI
@@ -425,6 +428,77 @@ def crop_and_rotate(image: Image.Image, photo_info: dict) -> Image.Image:
     return cropped
 
 
+XMP_NS_PREFIX = b'http://ns.adobe.com/xap/1.0/\x00'
+
+
+def _jpeg_replace_xmp(jpeg_data: bytes, xmp_payload: bytes) -> bytes:
+    """Remove existing XMP from JPEG and insert new XMP payload after SOI."""
+    if len(jpeg_data) < 4 or jpeg_data[:2] != b'\xff\xd8':
+        return jpeg_data
+
+    output = bytearray(jpeg_data[:2])  # SOI
+    pos = 2
+
+    while pos < len(jpeg_data) - 1:
+        if jpeg_data[pos] != 0xFF:
+            output.extend(jpeg_data[pos:])
+            break
+        marker = jpeg_data[pos:pos + 2]
+        if marker == b'\xff\xda':  # SOS — rest is image data
+            output.extend(jpeg_data[pos:])
+            break
+        if marker[1] in (0x00, 0x01) or 0xd0 <= marker[1] <= 0xd9:
+            output.extend(marker)
+            pos += 2
+            continue
+        if pos + 4 > len(jpeg_data):
+            output.extend(jpeg_data[pos:])
+            break
+        length = int.from_bytes(jpeg_data[pos + 2:pos + 4], 'big')
+        segment = jpeg_data[pos:pos + 2 + length]
+        # Skip existing XMP APP1 segments
+        if marker == b'\xff\xe1' and XMP_NS_PREFIX in segment[4:4 + len(XMP_NS_PREFIX) + 4]:
+            pos += 2 + length
+            continue
+        output.extend(segment)
+        pos += 2 + length
+
+    # Build new XMP APP1 segment and insert after SOI
+    full_payload = XMP_NS_PREFIX + xmp_payload
+    xmp_seg = b'\xff\xe1' + (len(full_payload) + 2).to_bytes(2, 'big') + full_payload
+    return bytes(output[:2]) + xmp_seg + bytes(output[2:])
+
+
+def set_xmp_description(image_path: str, description: str):
+    """Write XMP dc:description into a JPEG file."""
+    escaped = xml.sax.saxutils.escape(description)
+    xmp_xml = (
+        '<?xpacket begin="\xef\xbb\xbf" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+        ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+        '  <rdf:Description rdf:about=""\n'
+        '    xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+        '   <dc:description>\n'
+        '    <rdf:Alt>\n'
+        f'     <rdf:li xml:lang="x-default">{escaped}</rdf:li>\n'
+        '    </rdf:Alt>\n'
+        '   </dc:description>\n'
+        '  </rdf:Description>\n'
+        ' </rdf:RDF>\n'
+        '</x:xmpmeta>\n'
+        '<?xpacket end="w"?>'
+    ).encode('utf-8')
+
+    try:
+        with open(image_path, 'rb') as f:
+            data = f.read()
+        result = _jpeg_replace_xmp(data, xmp_xml)
+        with open(image_path, 'wb') as f:
+            f.write(result)
+    except Exception as e:
+        print(f"    Warning: could not write XMP: {e}")
+
+
 def set_exif_metadata(image_path: str, date: str | None, location: str | None,
                       caption: str | None, default_location: str | None = None):
     try:
@@ -462,6 +536,9 @@ def set_exif_metadata(image_path: str, date: str | None, location: str | None,
         piexif.insert(exif_bytes, image_path)
     except Exception as e:
         print(f"    Warning: could not write EXIF: {e}")
+
+    if caption:
+        set_xmp_description(image_path, caption)
 
 
 # ---------------------------------------------------------------------------

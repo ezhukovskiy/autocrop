@@ -15,6 +15,7 @@ Usage:
     python enhance.py ./cropped/ --batch                # batch mode (50% cheaper)
     python enhance.py ./cropped/ --batch --poll 60      # batch, poll every 60s
 """
+from __future__ import annotations
 
 import argparse
 import base64
@@ -28,9 +29,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from google import genai
-from google.genai import types
+import piexif
 from PIL import Image
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".bmp"}
@@ -101,15 +108,96 @@ def get_mime_type(image_path: str) -> str:
     }.get(ext, "image/jpeg")
 
 
-def preserve_exif(source_path: str, dest_path: str):
-    """Copy EXIF metadata from source to dest image."""
+XMP_NS_PREFIX = b'http://ns.adobe.com/xap/1.0/\x00'
+
+
+def _jpeg_replace_xmp(jpeg_data: bytes, xmp_payload: bytes) -> bytes:
+    """Remove existing XMP from JPEG and insert new XMP payload after SOI."""
+    if len(jpeg_data) < 4 or jpeg_data[:2] != b'\xff\xd8':
+        return jpeg_data
+
+    output = bytearray(jpeg_data[:2])  # SOI
+    pos = 2
+
+    while pos < len(jpeg_data) - 1:
+        if jpeg_data[pos] != 0xFF:
+            output.extend(jpeg_data[pos:])
+            break
+        marker = jpeg_data[pos:pos + 2]
+        if marker == b'\xff\xda':
+            output.extend(jpeg_data[pos:])
+            break
+        if marker[1] in (0x00, 0x01) or 0xd0 <= marker[1] <= 0xd9:
+            output.extend(marker)
+            pos += 2
+            continue
+        if pos + 4 > len(jpeg_data):
+            output.extend(jpeg_data[pos:])
+            break
+        length = int.from_bytes(jpeg_data[pos + 2:pos + 4], 'big')
+        segment = jpeg_data[pos:pos + 2 + length]
+        if marker == b'\xff\xe1' and XMP_NS_PREFIX in segment[4:4 + len(XMP_NS_PREFIX) + 4]:
+            pos += 2 + length
+            continue
+        output.extend(segment)
+        pos += 2 + length
+
+    full_payload = XMP_NS_PREFIX + xmp_payload
+    xmp_seg = b'\xff\xe1' + (len(full_payload) + 2).to_bytes(2, 'big') + full_payload
+    return bytes(output[:2]) + xmp_seg + bytes(output[2:])
+
+
+def _jpeg_extract_xmp(jpeg_data: bytes) -> bytes | None:
+    """Extract raw XMP payload (without namespace prefix) from JPEG data."""
+    if len(jpeg_data) < 4 or jpeg_data[:2] != b'\xff\xd8':
+        return None
+    pos = 2
+    while pos < len(jpeg_data) - 1:
+        if jpeg_data[pos] != 0xFF:
+            break
+        marker = jpeg_data[pos:pos + 2]
+        if marker == b'\xff\xda':
+            break
+        if marker[1] in (0x00, 0x01) or 0xd0 <= marker[1] <= 0xd9:
+            pos += 2
+            continue
+        if pos + 4 > len(jpeg_data):
+            break
+        length = int.from_bytes(jpeg_data[pos + 2:pos + 4], 'big')
+        ns_start = pos + 4
+        ns_end = ns_start + len(XMP_NS_PREFIX)
+        if marker == b'\xff\xe1' and jpeg_data[ns_start:ns_end] == XMP_NS_PREFIX:
+            return jpeg_data[ns_end:pos + 2 + length]
+        pos += 2 + length
+    return None
+
+
+def preserve_xmp(source_path: str, dest_path: str):
+    """Copy XMP metadata from source to dest JPEG."""
     try:
-        import piexif
+        with open(source_path, 'rb') as f:
+            src_data = f.read()
+        xmp_payload = _jpeg_extract_xmp(src_data)
+        if not xmp_payload:
+            return
+        with open(dest_path, 'rb') as f:
+            dest_data = f.read()
+        result = _jpeg_replace_xmp(dest_data, xmp_payload)
+        with open(dest_path, 'wb') as f:
+            f.write(result)
+    except Exception:
+        pass
+
+
+def preserve_exif(source_path: str, dest_path: str):
+    """Copy EXIF and XMP metadata from source to dest image."""
+    try:
         exif_dict = piexif.load(source_path)
         exif_bytes = piexif.dump(exif_dict)
         piexif.insert(exif_bytes, dest_path)
     except Exception:
         pass
+    preserve_xmp(source_path, dest_path)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +525,10 @@ def main():
     image_files = collect_images(input_path)
     if not image_files:
         print(f"No image files found in {input_path}")
+        sys.exit(1)
+
+    if genai is None:
+        print("Error: google-genai package required for enhancement. Install with: pip install google-genai", file=sys.stderr)
         sys.exit(1)
 
     if args.output:
