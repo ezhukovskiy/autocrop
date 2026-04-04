@@ -711,7 +711,7 @@ def ask_dates_interactive(page_results: list[tuple[int, PageResult]],
         return
 
     print()
-    print(f"{len(all_undated)} photo(s) have no date. Enter date for each (YYYY, YYYY-MM, or YYYY-MM-DD).")
+    print(f"{len(all_undated)} photo(s) have no date. Enter date for each (YYYY, YYYY:MM, or YYYY:MM:DD).")
     print("Press Enter to skip, 'q' to stop.\n")
 
     files_updated = 0
@@ -738,13 +738,12 @@ def ask_dates_interactive(page_results: list[tuple[int, PageResult]],
             continue
 
         # Validate format
-        if not re.match(r"^\d{4}(-\d{2}(-\d{2})?)?$", user_input):
-            print(f"  Invalid format, skipping. Use YYYY, YYYY-MM, or YYYY-MM-DD")
+        if not re.match(r"^\d{4}(:\d{2}(:\d{2})?)?$", user_input):
+            print(f"  Invalid format, skipping. Use YYYY, YYYY:MM, or YYYY:MM:DD")
             continue
 
-        # Convert to EXIF format (colon-separated)
-        exif_date = user_input.replace("-", ":")
-        date_prefix = user_input.replace("-", "")
+        exif_date = user_input
+        date_prefix = user_input.replace(":", "")
         new_name = f"{date_prefix}_{name}"
         new_path = os.path.join(output_dir, new_name)
         os.rename(out_path, new_path)
