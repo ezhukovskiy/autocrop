@@ -42,6 +42,9 @@ python autocrop.py ./album_pages/ -p gemini --verify
 
 # With fallback location for geocoding
 python autocrop.py ./album_pages/ -p gemini --default-location "Berlin"
+
+# Restrict geocoding to specific countries
+python autocrop.py ./album_pages/ -p gemini --default-location "Karaganda" --countries "kz,ru"
 ```
 
 **Features:**
@@ -62,6 +65,8 @@ python autocrop.py ./album_pages/ -p gemini --default-location "Berlin"
 | `-m, --model` | Vision model name |
 | `--api-key` | API key (default: from env var) |
 | `--default-location` | Fallback city/region for geocoding |
+| `--countries` | Restrict geocoding to these countries (comma-separated [ISO codes](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2), e.g. `kz,ru,ua,us`) |
+| `--no-location-spread` | Don't apply a recognized location from one photo to other photos on the same page |
 | `-j, --jobs N` | Parallel pages (default: 4) |
 | `--verify` | Double-pass verification with arbitration (2-3x API cost) |
 
@@ -136,7 +141,7 @@ Any model name can be passed via `-m`.
 pip install -r requirements.txt
 ```
 
-Requires Python 3.10+. No GPU needed.
+Requires Python 3.9+. No GPU needed.
 
 ## License
 

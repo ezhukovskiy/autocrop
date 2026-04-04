@@ -45,9 +45,9 @@ PROVIDERS = {
     },
 }
 
-VISION_PROMPT = """\
+VISION_PROMPT_TEMPLATE = """\
 You are analyzing a scanned photo of an album page. The page may contain one or more individual photographs glued/placed on it, possibly with handwritten captions, dates, or location names near them.
-
+{countries_hint}
 For each individual photograph you can see on this album page, provide:
 
 1. **bbox** — bounding box as [x1, y1, x2, y2] in percentage of image dimensions (0-100). (x1,y1) is top-left, (x2,y2) is bottom-right of the photo area.
@@ -58,27 +58,39 @@ For each individual photograph you can see on this album page, provide:
    - "right": heads/sky are at the right side of the bbox (photo is rotated 90° clockwise)
    IMPORTANT: If multiple photos are on the same page, check each one independently — they may have different orientations. Pay special attention to upside-down photos where hair is at the bottom and feet/ground are at the top.
 3. **date** — date of the photo if visible (from captions/handwriting near the photo). Use format "YYYY:MM:DD" if full date is known, "YYYY:MM" if only month/year, "YYYY" if only year, or null if unknown.
-4. **location** — location/place name ONLY if explicitly written as text near the photo (handwritten or printed caption). Do NOT guess or infer location from the photo content. If no location text is visible, return null.
+4. **location** — location ONLY if explicitly written as text near the photo (handwritten or printed caption). Do NOT guess or infer location from the photo content. If no location text is visible, return null. IMPORTANT: normalize the location to a geocodable format "City, Country" (e.g. "Караганда, Казахстан", "Tuscaloosa, USA", "Омутнинск, Россия"). Extract the city/town name from the handwritten text and add the country. Keep the original language of the text (do NOT translate to English). Drop extra words like "near", "at the dacha in", "center of", etc.
 5. **caption** — any handwritten text, caption or inscription near/on the photo that relates to it (e.g. names, comments, quotes). Transcribe exactly as written. Do NOT include date or location here — those go in the "date" and "location" fields. Only include additional text like names, comments, quotes. null if none.
-6. **description** — brief description of what's in the photo (1 sentence).
 
 Return a JSON object with a single key "photos" containing an array of objects.
 Example:
-{
+{{
   "photos": [
-    {
+    {{
       "bbox": [5.2, 10.1, 48.5, 55.3],
       "top_side": "top",
       "date": "1985:07",
-      "location": "Sochi",
-      "caption": "Think...",
-      "description": "Family at the beach"
-    }
+      "location": "Сочи, Россия",
+      "caption": "Think..."
+    }}
   ]
-}
+}}
 
-Be precise with bounding boxes — they should tightly wrap each individual photo, not the captions. If there are no photos on the page, return {"photos": []}.
+Be precise with bounding boxes — they should tightly wrap each individual photo, not the captions. If there are no photos on the page, return {{"photos": []}}.
 """
+
+
+def _build_vision_prompt(countries: str | None = None) -> str:
+    """Build the vision prompt, optionally adding country context."""
+    if countries:
+        codes = [c.strip().upper() for c in countries.split(",")]
+        hint = (
+            f"\nThese photos were taken in: {', '.join(codes)}. "
+            "Use this context when interpreting handwritten location names — "
+            "they likely refer to places in these countries.\n"
+        )
+    else:
+        hint = ""
+    return VISION_PROMPT_TEMPLATE.format(countries_hint=hint)
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +101,16 @@ _geocode_cache: dict[str, tuple[float, float] | None] = {}
 _geocode_lock = threading.Lock()
 
 
-def geocode_location(location: str, default_location: str | None = None) -> tuple[float, float] | None:
-    """Convert location name to (lat, lon) using Nominatim. Thread-safe."""
-    cache_key = f"{location}|{default_location or ''}"
+def geocode_location(location: str, default_location: str | None = None,
+                     country_codes: str | None = None) -> tuple[float, float] | None:
+    """Convert location name to (lat, lon) using Nominatim. Thread-safe.
+
+    Args:
+        country_codes: comma-separated ISO 3166-1 alpha-2 codes (e.g. "kz,ru")
+                       to restrict geocoding results. If the location doesn't
+                       resolve within these countries, falls back to default_location.
+    """
+    cache_key = f"{location}|{default_location or ''}|{country_codes or ''}"
     with _geocode_lock:
         if cache_key in _geocode_cache:
             return _geocode_cache[cache_key]
@@ -104,8 +123,10 @@ def geocode_location(location: str, default_location: str | None = None) -> tupl
 
     for query in queries:
         try:
-            params = urllib.parse.urlencode({"q": query, "format": "json", "limit": 1})
-            url = f"https://nominatim.openstreetmap.org/search?{params}"
+            params = {"q": query, "format": "json", "limit": 1}
+            if country_codes:
+                params["countrycodes"] = country_codes
+            url = f"https://nominatim.openstreetmap.org/search?{urllib.parse.urlencode(params)}"
             req = urllib.request.Request(url, headers={"User-Agent": "autocrop-script/1.0"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
@@ -203,10 +224,12 @@ def parse_json_response(content: str) -> dict:
 # Vision API
 # ---------------------------------------------------------------------------
 
-def analyze_page(client: OpenAI, image_path: str, model: str, provider: str) -> list[dict]:
+def analyze_page(client: OpenAI, image_path: str, model: str, provider: str,
+                 prompt: str | None = None) -> list[dict]:
     """Send album page image to Vision API and get photo coordinates."""
     b64 = encode_image_base64(image_path)
     media_type = get_image_media_type(image_path)
+    vision_prompt = prompt or _build_vision_prompt()
 
     print(f"  Analyzing with {provider}/{model}...")
 
@@ -215,11 +238,11 @@ def analyze_page(client: OpenAI, image_path: str, model: str, provider: str) -> 
         messages=[{
             "role": "user",
             "content": [
-                {"type": "text", "text": VISION_PROMPT},
+                {"type": "text", "text": vision_prompt},
                 {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}", "detail": "high"}},
             ],
         }],
-        max_tokens=8192,
+        max_tokens=16384,
     )
     if provider == "openai":
         kwargs["response_format"] = {"type": "json_object"}
@@ -299,20 +322,21 @@ def _photos_agree(a: dict, b: dict, iou_threshold: float = 0.75) -> bool:
 
 
 def analyze_page_verified(
-    client: OpenAI, image_path: str, model: str, provider: str
+    client: OpenAI, image_path: str, model: str, provider: str,
+    prompt: str | None = None,
 ) -> list[dict]:
     """Double-pass analysis: run twice, compare, arbitrate if needed."""
 
     print(f"  Pass 1/2...")
-    pass1 = analyze_page(client, image_path, model, provider)
+    pass1 = analyze_page(client, image_path, model, provider, prompt)
 
     print(f"  Pass 2/2...")
-    pass2 = analyze_page(client, image_path, model, provider)
+    pass2 = analyze_page(client, image_path, model, provider, prompt)
 
     # If different number of photos detected, need arbitration
     if len(pass1) != len(pass2):
         print(f"  Mismatch: pass1={len(pass1)} photos, pass2={len(pass2)} photos. Arbitrating...")
-        pass3 = analyze_page(client, image_path, model, provider)
+        pass3 = analyze_page(client, image_path, model, provider, prompt)
         # Use the count that 2 out of 3 agree on
         counts = [len(pass1), len(pass2), len(pass3)]
         if counts[0] == counts[1]:
@@ -341,7 +365,7 @@ def analyze_page_verified(
             merged = dict(a)
             merged["bbox"] = _average_bbox(a["bbox"], b["bbox"])
             # Prefer non-null metadata
-            for key in ("date", "location", "caption", "description"):
+            for key in ("date", "location", "caption"):
                 if not merged.get(key) and b.get(key):
                     merged[key] = b[key]
             result.append(merged)
@@ -350,7 +374,7 @@ def analyze_page_verified(
 
     if needs_arbitration:
         print(f"  {len(needs_arbitration)} photo(s) disagree, arbitrating...")
-        pass3 = analyze_page(client, image_path, model, provider)
+        pass3 = analyze_page(client, image_path, model, provider, prompt)
         matches3 = _match_photos(pass1, pass3)
         match3_map = {i: j for i, j, _ in matches3}
 
@@ -500,7 +524,8 @@ def set_xmp_description(image_path: str, description: str):
 
 
 def set_exif_metadata(image_path: str, date: str | None, location: str | None,
-                      caption: str | None, default_location: str | None = None):
+                      caption: str | None, default_location: str | None = None,
+                      country_codes: str | None = None):
     try:
         exif_dict = piexif.load(image_path)
     except Exception:
@@ -519,7 +544,7 @@ def set_exif_metadata(image_path: str, date: str | None, location: str | None,
         exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_date.encode()
 
     if location and location.strip():
-        coords = geocode_location(location.strip(), default_location)
+        coords = geocode_location(location.strip(), default_location, country_codes)
         if coords:
             lat, lon = coords
             exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = b"N" if lat >= 0 else b"S"
@@ -557,15 +582,18 @@ class PageResult:
 def process_page(
     client: OpenAI, image_path: str, output_dir: str,
     model: str, provider: str, default_location: str | None = None,
+    country_codes: str | None = None,
     page_num: int = 0, total_pages: int = 0, verify: bool = False,
+    no_location_spread: bool = False,
 ) -> PageResult:
     """Process one album page. Returns PageResult with date info for post-processing."""
     progress = f"[{page_num}/{total_pages}] " if total_pages else ""
     print(f"{progress}Processing: {image_path}")
+    prompt = _build_vision_prompt(country_codes)
     if verify:
-        photos = analyze_page_verified(client, image_path, model, provider)
+        photos = analyze_page_verified(client, image_path, model, provider, prompt)
     else:
-        photos = analyze_page(client, image_path, model, provider)
+        photos = analyze_page(client, image_path, model, provider, prompt)
 
     if not photos:
         print("  No photos detected.")
@@ -583,7 +611,7 @@ def process_page(
     page_dates = [p["date"].strip() for p in photos if p.get("date") and str(p["date"]).strip() not in _null_values]
     page_locations = [p["location"].strip() for p in photos if p.get("location") and str(p["location"]).strip() not in _null_values]
     fallback_date = page_dates[0] if page_dates else None
-    fallback_location = page_locations[0] if page_locations else default_location
+    fallback_location = default_location if no_location_spread else (page_locations[0] if page_locations else default_location)
 
     count = 0
     undated_files = []
@@ -605,7 +633,7 @@ def process_page(
 
         out_path = os.path.join(output_dir, out_name)
         cropped.save(out_path, "JPEG", quality=95)
-        set_exif_metadata(out_path, date, location, caption, default_location)
+        set_exif_metadata(out_path, date, location, caption, default_location, country_codes)
 
         if not date:
             undated_files.append((out_path, location, caption))
@@ -623,7 +651,8 @@ def process_page(
     return PageResult(count=count, page_date=fallback_date, undated_files=undated_files)
 
 
-def backfill_dates(page_results: list[tuple[int, PageResult]], output_dir: str, default_location: str | None):
+def backfill_dates(page_results: list[tuple[int, PageResult]], output_dir: str,
+                   default_location: str | None, country_codes: str | None = None):
     """Post-processing: fill dates for undated photos from nearest previous page."""
     # Sort by page index (original order in album)
     page_results.sort(key=lambda x: x[0])
@@ -647,7 +676,7 @@ def backfill_dates(page_results: list[tuple[int, PageResult]], output_dir: str, 
             os.rename(out_path, new_path)
 
             # Update EXIF with inherited date
-            set_exif_metadata(new_path, last_known_date, location, caption, default_location)
+            set_exif_metadata(new_path, last_known_date, location, caption, default_location, country_codes)
             print(f"  Backfilled date {last_known_date} -> {new_name}")
             files_updated += 1
 
@@ -670,9 +699,13 @@ def main():
     parser.add_argument("-m", "--model", default=None, help="Vision model name")
     parser.add_argument("--api-key", default=None, help="API key (default: from env var)")
     parser.add_argument("--default-location", default=None, help="Fallback city/region for geocoding")
+    parser.add_argument("--countries", default=None,
+                        help="Restrict geocoding to these countries (comma-separated ISO codes, e.g. 'kz,ru')")
     parser.add_argument("-j", "--jobs", type=int, default=4, help="Parallel pages (default: 4)")
     parser.add_argument("--verify", action="store_true",
                         help="Double-pass verification: analyze each page twice, arbitrate on disagreement (2-3x API cost)")
+    parser.add_argument("--no-location-spread", action="store_true",
+                        help="Don't apply a recognized location from one photo to other photos on the same page")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -710,6 +743,7 @@ def main():
     print(f"Provider:         {args.provider}")
     print(f"Model:            {model}")
     print(f"Default location: {args.default_location or '(none)'}")
+    print(f"Countries:        {args.countries or '(any)'}")
     print(f"Parallel jobs:    {args.jobs}")
     print(f"Verify (2-pass):  {'yes (2-3x API cost)' if args.verify else 'no'}")
     print("=" * 60)
@@ -724,7 +758,7 @@ def main():
     if args.jobs <= 1 or n_pages == 1:
         for idx, img_path in enumerate(image_files, 1):
             try:
-                result = process_page(client, str(img_path), output_dir, model, args.provider, args.default_location, idx, n_pages, args.verify)
+                result = process_page(client, str(img_path), output_dir, model, args.provider, args.default_location, args.countries, idx, n_pages, args.verify, args.no_location_spread)
                 total += result.count
                 page_results.append((idx, result))
             except Exception as e:
@@ -735,7 +769,7 @@ def main():
     else:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {
-                pool.submit(process_page, client, str(img_path), output_dir, model, args.provider, args.default_location, idx, n_pages, args.verify): (idx, img_path)
+                pool.submit(process_page, client, str(img_path), output_dir, model, args.provider, args.default_location, args.countries, idx, n_pages, args.verify, args.no_location_spread): (idx, img_path)
                 for idx, img_path in enumerate(image_files, 1)
             }
             for future in as_completed(futures):
@@ -755,7 +789,7 @@ def main():
     has_any_date = any(r.page_date for _, r in page_results)
     if has_undated and has_any_date:
         print("Backfilling dates from neighboring pages...")
-        backfill_dates(page_results, output_dir, args.default_location)
+        backfill_dates(page_results, output_dir, args.default_location, args.countries)
         print()
 
     print(f"Done! Extracted {total} photo(s) into {output_dir}")
