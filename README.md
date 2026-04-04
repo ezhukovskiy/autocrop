@@ -67,6 +67,7 @@ python autocrop.py ./album_pages/ -p gemini --default-location "Karaganda" --cou
 | `--default-location` | Fallback city/region for geocoding |
 | `--countries` | Restrict geocoding to these countries (comma-separated [ISO codes](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2), e.g. `kz,ru,ua,us`) |
 | `--no-location-spread` | Don't apply a recognized location from one photo to other photos on the same page |
+| `--ask-dates` | Interactively prompt for dates of undated photos after processing; skipped photos are backfilled from entered dates |
 | `-j, --jobs N` | Parallel pages (default: 4) |
 | `--verify` | Double-pass verification with arbitration (2-3x API cost) |
 

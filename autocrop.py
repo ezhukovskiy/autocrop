@@ -653,18 +653,26 @@ def process_page(
 
 def backfill_dates(page_results: list[tuple[int, PageResult]], output_dir: str,
                    default_location: str | None, country_codes: str | None = None):
-    """Post-processing: fill dates for undated photos from nearest previous page."""
+    """Post-processing: fill dates for undated photos from nearest previous page.
+
+    Returns list of (path, location, caption) for files that are still undated.
+    """
     # Sort by page index (original order in album)
     page_results.sort(key=lambda x: x[0])
 
     last_known_date = None
     files_updated = 0
+    still_undated: list[tuple[str, str | None, str | None]] = []
 
     for _idx, result in page_results:
         if result.page_date:
             last_known_date = result.page_date
 
-        if not result.undated_files or not last_known_date:
+        if not result.undated_files:
+            continue
+
+        if not last_known_date:
+            still_undated.extend(result.undated_files)
             continue
 
         for out_path, location, caption in result.undated_files:
@@ -682,7 +690,76 @@ def backfill_dates(page_results: list[tuple[int, PageResult]], output_dir: str,
 
     if files_updated:
         print(f"  Updated {files_updated} file(s) with inherited dates")
-    return files_updated
+    return still_undated
+
+
+def ask_dates_interactive(page_results: list[tuple[int, PageResult]],
+                          output_dir: str, default_location: str | None,
+                          country_codes: str | None = None):
+    """Prompt user to enter dates for undated photos.
+
+    Modifies page_results in place: removes dated files from undated_files
+    and sets page_date so subsequent backfill can use them.
+    """
+    page_results.sort(key=lambda x: x[0])
+    all_undated = []
+    for _, result in page_results:
+        for entry in result.undated_files:
+            all_undated.append((entry, result))
+
+    if not all_undated:
+        return
+
+    print()
+    print(f"{len(all_undated)} photo(s) have no date. Enter date for each (YYYY, YYYY-MM, or YYYY-MM-DD).")
+    print("Press Enter to skip, 'q' to stop.\n")
+
+    files_updated = 0
+    for (out_path, location, caption), result in all_undated:
+        name = Path(out_path).name
+        parts = [f"  File: {name}"]
+        if caption:
+            parts.append(f"  Caption: {caption}")
+        if location:
+            parts.append(f"  Location: {location}")
+        print("\n".join(parts))
+
+        try:
+            user_input = input("  Date: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Stopped.")
+            break
+
+        if user_input.lower() == "q":
+            print("  Stopped.")
+            break
+
+        if not user_input:
+            continue
+
+        # Validate format
+        if not re.match(r"^\d{4}(-\d{2}(-\d{2})?)?$", user_input):
+            print(f"  Invalid format, skipping. Use YYYY, YYYY-MM, or YYYY-MM-DD")
+            continue
+
+        # Convert to EXIF format (colon-separated)
+        exif_date = user_input.replace("-", ":")
+        date_prefix = user_input.replace("-", "")
+        new_name = f"{date_prefix}_{name}"
+        new_path = os.path.join(output_dir, new_name)
+        os.rename(out_path, new_path)
+
+        set_exif_metadata(new_path, exif_date, location, caption, default_location, country_codes)
+        print(f"  -> {new_name}")
+        files_updated += 1
+
+        # Update PageResult so backfill can use this date
+        result.undated_files.remove((out_path, location, caption))
+        if not result.page_date:
+            result.page_date = exif_date
+
+    if files_updated:
+        print(f"\nUpdated {files_updated} file(s) with manual dates")
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +783,8 @@ def main():
                         help="Double-pass verification: analyze each page twice, arbitrate on disagreement (2-3x API cost)")
     parser.add_argument("--no-location-spread", action="store_true",
                         help="Don't apply a recognized location from one photo to other photos on the same page")
+    parser.add_argument("--ask-dates", action="store_true",
+                        help="Interactively ask for dates of undated photos after processing; skipped photos are backfilled from entered dates")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -784,13 +863,28 @@ def main():
                     print(f"  Skipping this page and continuing...")
                 print()
 
-    # Post-processing: backfill dates from previous pages
+    # Post-processing: handle undated photos
     has_undated = any(r.undated_files for _, r in page_results)
-    has_any_date = any(r.page_date for _, r in page_results)
-    if has_undated and has_any_date:
-        print("Backfilling dates from neighboring pages...")
-        backfill_dates(page_results, output_dir, args.default_location, args.countries)
-        print()
+
+    if args.ask_dates and has_undated:
+        ask_dates_interactive(page_results, output_dir, args.default_location, args.countries)
+        # Backfill remaining skipped photos from dates entered above
+        still_has_undated = any(r.undated_files for _, r in page_results)
+        has_any_date = any(r.page_date for _, r in page_results)
+        if still_has_undated and has_any_date:
+            print("Backfilling skipped photos from entered dates...")
+            still_undated = backfill_dates(page_results, output_dir, args.default_location, args.countries)
+            if still_undated:
+                print(f"  {len(still_undated)} photo(s) still have no date")
+            print()
+    elif has_undated:
+        has_any_date = any(r.page_date for _, r in page_results)
+        if has_any_date:
+            print("Backfilling dates from neighboring pages...")
+            still_undated = backfill_dates(page_results, output_dir, args.default_location, args.countries)
+            if still_undated:
+                print(f"  {len(still_undated)} photo(s) still have no date")
+            print()
 
     print(f"Done! Extracted {total} photo(s) into {output_dir}")
     if errors:
