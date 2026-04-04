@@ -26,8 +26,12 @@ from pathlib import Path
 import xml.sax.saxutils
 
 import piexif
-from openai import OpenAI
 from PIL import Image
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".bmp"}

@@ -105,6 +105,44 @@ python enhance.py ./cropped/ -m gemini-3-pro-image-preview
 | `--batch` | Use Batch API (50% cheaper). `-j` and `--rpm` are ignored |
 | `--poll N` | Batch poll interval in seconds (default: 30) |
 
+## `edit_meta.py` — Fix metadata interactively
+
+Review and fix dates, locations, and captions for already-processed photos.
+
+```bash
+python edit_meta.py ./cropped/
+python edit_meta.py ./enhanced/ --countries "kz,ru"
+```
+
+The script displays a numbered table of all photos with their metadata, then accepts commands:
+
+```
+ #  File                              Date        Loc  Caption
+ 1  198905_page1_photo_01.jpg         1989:05       ✓  Walking with mom
+ 2  198905_page1_photo_02.jpg         1989:05       ✓  —
+ 3  page2_photo_01.jpg                —             —  Think...
+
+Enter commands: <number><D|L|C> <value>  (empty line to apply)
+> 3D 1989:06
+> 3L Berlin, Germany
+> 3L 49.5186, 72.8238
+> 1C Walking in the park
+>
+```
+
+| Command | Description |
+|---------|-------------|
+| `3D 1989:06` | Set date for photo #3 (also renames the file) |
+| `3L Berlin, Germany` | Set location by name (geocodes to GPS coordinates) |
+| `3L 49.5186, 72.8238` | Set location by coordinates (writes GPS directly, no geocoding) |
+| `1C Walking in the park` | Set caption |
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--countries` | Restrict geocoding to these countries (comma-separated [ISO codes](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2)) |
+
 ## Cost estimate
 
 All processing happens via API calls — no local GPU needed.
