@@ -45,7 +45,7 @@ PROVIDERS = {
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "env_key": "GEMINI_API_KEY",
-        "default_model": "gemini-2.5-flash-preview-05-20",
+        "default_model": "gemini-3-flash-preview",
     },
 }
 
@@ -376,6 +376,12 @@ def analyze_page_verified(
         else:
             needs_arbitration.append((idx_a, idx_b, a, b))
 
+    # Collect indices that were matched
+    matched_a = {idx_a for idx_a, _, _ in matches}
+
+    # Unmatched photos (present in both passes by count, but IoU too low to pair)
+    unmatched_a = [i for i in range(len(pass1)) if i not in matched_a]
+
     if needs_arbitration:
         print(f"  {len(needs_arbitration)} photo(s) disagree, arbitrating...")
         pass3 = analyze_page(client, image_path, model, provider, prompt)
@@ -406,6 +412,48 @@ def analyze_page_verified(
                 print(f"    Photo {idx_a+1}: no match in pass3, using pass1")
 
             result.append(winner)
+
+        # Also try to resolve unmatched photos via pass3
+        for idx_a in unmatched_a:
+            a = pass1[idx_a]
+            if idx_a in match3_map:
+                c = pass3[match3_map[idx_a]]
+                iou = _bbox_iou(a["bbox"], c["bbox"])
+                if iou > 0.3:
+                    merged = dict(a)
+                    merged["bbox"] = _average_bbox(a["bbox"], c["bbox"])
+                    for key in ("date", "location", "caption"):
+                        if not merged.get(key) and c.get(key):
+                            merged[key] = c[key]
+                    result.append(merged)
+                    print(f"    Photo {idx_a+1}: confirmed by pass3 (IoU={iou:.2f})")
+                else:
+                    result.append(a)
+                    print(f"    Photo {idx_a+1}: unmatched, using pass1 (pass3 IoU={iou:.2f})")
+            else:
+                result.append(a)
+                print(f"    Photo {idx_a+1}: unmatched, using pass1")
+    elif unmatched_a:
+        # No arbitration needed for matched photos, but some went unmatched.
+        # Both passes found same count, so unmatched photos are real — just unstable coords.
+        print(f"  {len(unmatched_a)} photo(s) had low IoU between passes, arbitrating...")
+        pass3 = analyze_page(client, image_path, model, provider, prompt)
+        matches3 = _match_photos(pass1, pass3)
+        match3_map = {i: j for i, j, _ in matches3}
+        for idx_a in unmatched_a:
+            a = pass1[idx_a]
+            if idx_a in match3_map:
+                c = pass3[match3_map[idx_a]]
+                merged = dict(a)
+                merged["bbox"] = _average_bbox(a["bbox"], c["bbox"])
+                for key in ("date", "location", "caption"):
+                    if not merged.get(key) and c.get(key):
+                        merged[key] = c[key]
+                result.append(merged)
+                print(f"    Photo {idx_a+1}: confirmed by pass3")
+            else:
+                result.append(a)
+                print(f"    Photo {idx_a+1}: unmatched, using pass1")
     else:
         print(f"  All {len(result)} photo(s) verified ✓")
 
