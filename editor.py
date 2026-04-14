@@ -1336,7 +1336,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
 
         elif path.startswith("/images/"):
-            filename = path[len("/images/"):]
+            filename = urllib.parse.unquote(path[len("/images/"):])
             filepath = self.input_dir / filename
             if not filepath.exists():
                 self._send(404, b"Not found")
@@ -1416,7 +1416,7 @@ def main():
     parser = argparse.ArgumentParser(description="Web-based metadata editor for autocrop")
     parser.add_argument("input", help="Directory containing scanned pages and autocrop_meta.json")
     parser.add_argument("-o", "--output", default=None, help="Output directory for cropped photos")
-    parser.add_argument("--port", type=int, default=8080, help="HTTP server port (default: 8080)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8080)), help="HTTP server port (default: 8080)")
     parser.add_argument("--no-browser", action="store_true", help="Don't open browser automatically")
     args = parser.parse_args()
 
