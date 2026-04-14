@@ -1435,8 +1435,15 @@ def main():
     EditorHandler.output_dir = output_dir
     EditorHandler.meta_path = meta_path
 
-    server = HTTPServer(("localhost", args.port), EditorHandler)
-    url = f"http://localhost:{args.port}"
+    port = args.port
+    while True:
+        try:
+            server = HTTPServer(("localhost", port), EditorHandler)
+            break
+        except OSError:
+            print(f"Port {port} is busy, trying {port + 1}...")
+            port += 1
+    url = f"http://localhost:{port}"
     print(f"Autocrop Editor running at {url}")
     print(f"  Input:  {input_dir}")
     print(f"  Output: {output_dir}")
