@@ -7,13 +7,14 @@ Got a stack of old photo albums? Snap a picture of each page, point this tool at
 ## How it works
 
 ```
-Album page scan ──▶ autocrop.py ──▶ Individual photos ──▶ enhance.py ──▶ Restored photos
-                    (Vision AI)     with EXIF metadata     (Gemini)      colorized & clean
+Album page scan ──▶ ai_parse.py ──▶ autocrop_meta.json ──▶ editor.py ──▶ crop_exif.py ──▶ ai_enhance.py
+                    (Vision AI)     (bbox + metadata)      (web editor)   (crop+EXIF)      (restore)
 ```
 
-1. **`autocrop.py`** sends each page to a Vision AI model (Gemini or GPT-4o) which returns bounding boxes, orientation, dates, locations, and captions
-2. The script crops each photo, rotates it upright, geocodes locations to GPS coordinates, and writes EXIF metadata
-3. **`enhance.py`** sends each cropped photo to Gemini's image generation model which restores it in one shot: removes album corners, fixes scratches, improves contrast, and colorizes B&W photos
+1. **`ai_parse.py`** sends each page to a Vision AI model (Gemini or GPT-4o) which returns bounding boxes, orientation, dates, locations, and captions — saved to `autocrop_meta.json`
+2. **`editor.py`** serves a web-based editor to visually review and adjust bounding boxes, rotation, dates, locations (with map), and captions
+3. **`crop_exif.py`** reads the metadata file and produces cropped photos with EXIF metadata
+4. **`ai_enhance.py`** sends each cropped photo to Gemini which restores it: removes album corners, fixes scratches, improves contrast, and colorizes B&W photos
 
 ## Quick start
 
@@ -21,38 +22,61 @@ Album page scan ──▶ autocrop.py ──▶ Individual photos ──▶ enha
 pip install -r requirements.txt
 export GEMINI_API_KEY="your-key"
 
-# Step 1: Extract photos from album pages
-python autocrop.py ./album_pages/ -p gemini --default-location "New York"
+# Step 1: Analyze pages and create metadata
+python ai_parse.py ./album_pages/ -p gemini --default-location "New York"
 
-# Step 2: Enhance extracted photos
-python enhance.py ./album_pages/cropped/ -o ./enhanced/
+# Step 2: Review and adjust in web editor
+python editor.py ./album_pages/
+
+# Step 3: Apply metadata to produce cropped photos (editor does this via Apply button, or run manually)
+python crop_exif.py ./album_pages/
+
+# Step 4: Enhance extracted photos
+python ai_enhance.py ./album_pages/cropped/ -o ./enhanced/
 ```
 
-## `autocrop.py` — Detect & crop
+Or use `--auto-apply` for the legacy one-shot workflow:
+
+```bash
+python ai_parse.py ./album_pages/ -p gemini --auto-apply
+```
+
+## `ai_parse.py` — Detect photos using AI
+
+### Modes
+
+**Default: create-metadata** — analyze pages and save results to `autocrop_meta.json` (no cropping):
+
+```bash
+python ai_parse.py ./album_pages/ -p gemini --default-location "Berlin"
+```
+
+**Auto-apply** — legacy one-shot mode (analyze + crop + save in one step):
+
+```bash
+python ai_parse.py ./album_pages/ -p gemini --auto-apply
+```
+
+### Examples
 
 ```bash
 # Single page
-python autocrop.py page.jpg -p gemini
+python ai_parse.py page.jpg -p gemini
 
 # Directory of pages, 4 in parallel
-python autocrop.py ./album_pages/ -p gemini -j 4
-
-# With double-pass verification (recommended, 2-3x API cost)
-python autocrop.py ./album_pages/ -p gemini --verify
+python ai_parse.py ./album_pages/ -p gemini -j 4
 
 # With fallback location for geocoding
-python autocrop.py ./album_pages/ -p gemini --default-location "Berlin"
+python ai_parse.py ./album_pages/ -p gemini --default-location "Berlin"
 
 # Restrict geocoding to specific countries
-python autocrop.py ./album_pages/ -p gemini --default-location "Karaganda" --countries "kz,ru"
+python ai_parse.py ./album_pages/ -p gemini --default-location "Karaganda" --countries "kz,ru"
 ```
 
 **Features:**
 - Photo detection via Gemini or GPT-4o Vision API
 - Reads handwritten dates, locations, and captions
 - GPS geocoding via OpenStreetMap Nominatim
-- EXIF metadata (date, GPS, caption) — works with Google Photos, Apple Photos, etc.
-- Double-pass verification (`--verify`) to catch crop/rotation errors
 - Date inheritance: undated photos get the date from the nearest dated page
 - Parallel page processing (`-j N`)
 
@@ -60,6 +84,7 @@ python autocrop.py ./album_pages/ -p gemini --default-location "Karaganda" --cou
 
 | Option | Description |
 |--------|-------------|
+| `--auto-apply` | Analyze + crop + save in one shot (legacy behavior) |
 | `-o, --output DIR` | Output directory (default: `<input>/cropped`) |
 | `-p, --provider` | `openai` or `gemini` (default: `openai`) |
 | `-m, --model` | Vision model name |
@@ -67,26 +92,78 @@ python autocrop.py ./album_pages/ -p gemini --default-location "Karaganda" --cou
 | `--default-location` | Fallback city/region for geocoding |
 | `--countries` | Restrict geocoding to these countries (comma-separated [ISO codes](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2), e.g. `kz,ru,ua,us`) |
 | `--no-location-spread` | Don't apply a recognized location from one photo to other photos on the same page |
-| `--ask-dates` | Interactively prompt for dates of undated photos after processing; skipped photos are backfilled from entered dates |
 | `-j, --jobs N` | Parallel pages (default: 4) |
-| `--verify` | Double-pass verification with arbitration (2-3x API cost) |
 
-## `enhance.py` — Restore & colorize
+## `crop_exif.py` — Crop photos and write EXIF
+
+Reads `autocrop_meta.json` and produces cropped, rotated JPEG files with EXIF metadata (date, GPS, caption).
+
+```bash
+python crop_exif.py ./album_pages/
+python crop_exif.py ./album_pages/ -o ./output/
+```
+
+No AI calls, no API key needed. Works with the metadata file created by `ai_parse.py` or `editor.py`.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output DIR` | Output directory (default: `<input>/cropped`) |
+
+## `editor.py` — Web-based metadata editor
+
+Visual editor for reviewing and adjusting photo detection results before cropping.
+
+```bash
+python editor.py ./album_pages/
+python editor.py ./album_pages/ -o ./output/ --port 8080
+```
+
+Works with or without `autocrop_meta.json` — if no metadata exists, each image is treated as a single full-page photo with EXIF fields pre-filled from the source file.
+
+Opens a web app at `http://localhost:8080` with two modes accessible via header toggle:
+
+**Cut photos** — adjust bounding boxes:
+- Drag corners and edges to resize photo boundaries
+- Drag inside a box to move it
+- Double-click to add a new photo
+- Delete key to remove selected photo (at least 1 photo per page required)
+
+**Edit photos** — edit photo details:
+- Preview cropped and rotated photos
+- Rotate photos left/right
+- Edit date and caption (changing a value suggests applying it to other photos with the same old value)
+- Select location on an interactive map (OpenStreetMap)
+- Save Draft or Apply to produce final cropped photos
+- Warns about unsaved changes on page close
+
+Navigation: Google-style page selector in header, arrow keys for prev/next page.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output DIR` | Output directory for cropped photos (default: `<input>/cropped`) |
+| `--port N` | HTTP server port (default: 8080) |
+| `--no-browser` | Don't open browser automatically |
+
+## `ai_enhance.py` — Restore & colorize
 
 Sends each photo to Gemini which restores it in one API call: removes album corner holders, fixes scratches and defects, improves contrast, and colorizes B&W photos.
 
 ```bash
 # Single photo
-python enhance.py photo.jpg
+python ai_enhance.py photo.jpg
 
 # Directory, 3 parallel workers
-python enhance.py ./cropped/ -j 3 --rpm 10
+python ai_enhance.py ./cropped/ -j 3 --rpm 10
 
 # Batch mode (50% cheaper, slower)
-python enhance.py ./cropped/ --batch
+python ai_enhance.py ./cropped/ --batch
 
 # Pro model for higher quality
-python enhance.py ./cropped/ -m gemini-3-pro-image-preview
+python ai_enhance.py ./cropped/ -m gemini-3-pro-image-preview
 ```
 
 **Two modes:**
@@ -105,9 +182,9 @@ python enhance.py ./cropped/ -m gemini-3-pro-image-preview
 | `--batch` | Use Batch API (50% cheaper). `-j` and `--rpm` are ignored |
 | `--poll N` | Batch poll interval in seconds (default: 30) |
 
-## `edit_meta.py` — Fix metadata interactively
+## `edit_meta.py` — Fix metadata interactively (CLI)
 
-Review and fix dates, locations, and captions for already-processed photos.
+Terminal-based metadata editor for already-cropped photos.
 
 ```bash
 python edit_meta.py ./cropped/
@@ -147,12 +224,11 @@ Enter commands: <number><D|L|C> <value>  (empty line to apply)
 
 All processing happens via API calls — no local GPU needed.
 
-**autocrop.py** (Gemini Flash):
+**ai_parse.py** (Gemini Flash):
 - ~$0.0003 per page (~3K input tokens)
-- With `--verify`: ~$0.0006-0.0009 per page
-- 100-page album: **~$0.03-0.09**
+- 100-page album: **~$0.03**
 
-**enhance.py** (Gemini Flash Image):
+**ai_enhance.py** (Gemini Flash Image):
 - ~$0.04 per photo (image generation)
 - With `--batch`: ~$0.02 per photo (50% off)
 - 200 photos: **~$4-8**
@@ -165,12 +241,12 @@ All processing happens via API calls — no local GPU needed.
 | Tier 1 (paid) | 10 | 500 |
 | Tier 2 | 20 | 2,000 |
 
-## Supported providers (autocrop)
+## Supported providers (ai_parse)
 
 | Provider | Default Model | Env Variable |
 |----------|--------------|-------------|
 | OpenAI | `gpt-4o` | `OPENAI_API_KEY` |
-| Gemini | `gemini-2.5-flash-preview-05-20` | `GEMINI_API_KEY` |
+| Gemini | `gemini-3-flash-preview` | `GEMINI_API_KEY` |
 
 Any model name can be passed via `-m`.
 
