@@ -254,6 +254,7 @@ button { font-family: inherit; transition: all 0.15s; }
 </div>
 
 <div id="crop-view">
+  <div id="crop-filename" style="text-align:center; color:#aaa; margin:0 0 8px;"></div>
   <canvas id="crop-canvas"></canvas>
   <div class="crop-toolbar">
     <button class="btn-secondary" onclick="addPhoto()">+ Add Photo</button>
@@ -551,6 +552,7 @@ function drawCrop() {
   });
 
   updateDeleteButton();
+  document.getElementById('crop-filename').textContent = page.source;
 }
 
 function updateDeleteButton() {
