@@ -20,6 +20,8 @@ import sys
 import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+import urllib.parse
+import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 from PIL import Image
@@ -307,6 +309,7 @@ let leafletLoaded = false;
 
 const COLORS = ['#d4a853','#e07070','#5cb870','#5ba3d9','#b07cd4','#4dbfb0','#d4883d','#6b8fd4'];
 const HANDLE_SIZE = 8;
+const PAD = 12; // padding around image for handles at edges
 
 // =========================================================================
 // Init
@@ -317,6 +320,51 @@ async function init() {
   currentPageIdx = 0;
   renderPagination();
   setMode('crops');
+  resolveCoordinateLocations();
+}
+
+// Track which locations the user has manually edited (pageIdx:photoIdx)
+const userEditedLocations = new Set();
+
+async function resolveCoordinateLocations() {
+  // Collect unique coordinate strings that need resolving
+  const coordPattern = /^-?\d+\.\d+,\s*-?\d+\.\d+$/;
+  const toResolve = new Map(); // coords -> [{pageIdx, photoIdx}]
+
+  for (let p = 0; p < metadata.pages.length; p++) {
+    const photos = metadata.pages[p].photos;
+    for (let i = 0; i < photos.length; i++) {
+      const loc = photos[i].location;
+      if (loc && coordPattern.test(loc.trim())) {
+        const key = loc.trim();
+        if (!toResolve.has(key)) toResolve.set(key, []);
+        toResolve.get(key).push({pageIdx: p, photoIdx: i});
+      }
+    }
+  }
+
+  for (const [coords, targets] of toResolve) {
+    try {
+      const resp = await fetch('/api/reverse-geocode?coords=' + encodeURIComponent(coords));
+      const data = await resp.json();
+      if (data.name) {
+        for (const {pageIdx, photoIdx} of targets) {
+          if (userEditedLocations.has(pageIdx + ':' + photoIdx)) continue;
+          const photo = metadata.pages[pageIdx].photos[photoIdx];
+          // Store coords for EXIF, replace display with name
+          if (!photo._coords) photo._coords = photo.location;
+          photo.location_name = data.name;
+          photo.location = data.name;
+        }
+        // Re-render current page if affected
+        if (targets.some(t => t.pageIdx === currentPageIdx) && currentMode === 'metadata') {
+          renderPhotoCards();
+        }
+      }
+    } catch (e) {
+      console.warn('Reverse geocode failed for', coords, e);
+    }
+  }
 }
 
 // =========================================================================
@@ -325,7 +373,7 @@ async function init() {
 function navigateToPage(idx) {
   if (!metadata || idx < 0 || idx >= metadata.pages.length) return;
   currentPageIdx = idx;
-  selectedBox = -1;
+  selectedBox = (currentMode === 'crops' && metadata.pages[idx].photos.length > 0) ? 0 : -1;
   renderPagination();
   if (currentMode === 'crops') {
     loadPageImage();
@@ -396,7 +444,7 @@ function setMode(mode) {
   if (mode === 'crops') {
     document.getElementById('crop-view').style.display = 'flex';
     document.getElementById('review-view').style.display = 'none';
-    selectedBox = -1;
+    selectedBox = (metadata.pages[currentPageIdx].photos.length > 0) ? 0 : -1;
     if (pageImage) { setupCanvas(); drawCrop(); }
     else loadPageImage();
   } else {
@@ -426,17 +474,18 @@ function loadPageImage() {
 // =========================================================================
 function setupCanvas() {
   const canvas = document.getElementById('crop-canvas');
-  const maxW = window.innerWidth * 0.95;
-  const maxH = window.innerHeight * 0.72;
+  const maxW = window.innerWidth * 0.95 - 2 * PAD;
+  const maxH = window.innerHeight * 0.72 - 2 * PAD;
   const scale = Math.min(maxW / pageImage.naturalWidth, maxH / pageImage.naturalHeight, 1);
-  canvas.width = Math.round(pageImage.naturalWidth * scale);
-  canvas.height = Math.round(pageImage.naturalHeight * scale);
+  const imgW = Math.round(pageImage.naturalWidth * scale);
+  const imgH = Math.round(pageImage.naturalHeight * scale);
+  canvas.width = imgW + 2 * PAD;
+  canvas.height = imgH + 2 * PAD;
   canvas.style.width = canvas.width + 'px';
   canvas.style.height = canvas.height + 'px';
 
   canvas.onmousedown = onCanvasMouseDown;
   canvas.onmousemove = onCanvasMouseMove;
-  canvas.onmouseup = onCanvasMouseUp;
   canvas.ondblclick = onCanvasDblClick;
 }
 
@@ -447,14 +496,16 @@ function drawCrop() {
   const page = metadata.pages[currentPageIdx];
   const photos = page.photos;
 
-  ctx.drawImage(pageImage, 0, 0, w, h);
+  const imgW = w - 2 * PAD, imgH = h - 2 * PAD;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(pageImage, PAD, PAD, imgW, imgH);
 
   // Dark overlay with cutouts (even-odd)
   ctx.beginPath();
-  ctx.rect(0, 0, w, h);
+  ctx.rect(PAD, PAD, imgW, imgH);
   for (const photo of photos) {
     if (photo.skip) continue;
-    const [x1, y1, x2, y2] = bboxToPixels(photo.bbox, w, h);
+    const [x1, y1, x2, y2] = bboxToPixels(photo.bbox, imgW, imgH);
     ctx.moveTo(x1, y1);
     ctx.lineTo(x1, y2);
     ctx.lineTo(x2, y2);
@@ -467,7 +518,7 @@ function drawCrop() {
   // Borders and handles
   photos.forEach((photo, i) => {
     if (photo.skip) return;
-    const [x1, y1, x2, y2] = bboxToPixels(photo.bbox, w, h);
+    const [x1, y1, x2, y2] = bboxToPixels(photo.bbox, imgW, imgH);
     const color = COLORS[i % COLORS.length];
     const isSelected = (i === selectedBox);
 
@@ -509,15 +560,15 @@ function updateDeleteButton() {
   btn.disabled = (selectedBox < 0 || nonSkipped <= 1);
 }
 
-function bboxToPixels(bbox, w, h) {
-  return [bbox[0]/100*w, bbox[1]/100*h, bbox[2]/100*w, bbox[3]/100*h];
+function bboxToPixels(bbox, imgW, imgH) {
+  return [PAD + bbox[0]/100*imgW, PAD + bbox[1]/100*imgH, PAD + bbox[2]/100*imgW, PAD + bbox[3]/100*imgH];
 }
-function pixelsToBbox(x1, y1, x2, y2, w, h) {
-  return [x1/w*100, y1/h*100, x2/w*100, y2/h*100];
+function pixelsToBbox(x1, y1, x2, y2, imgW, imgH) {
+  return [(x1 - PAD)/imgW*100, (y1 - PAD)/imgH*100, (x2 - PAD)/imgW*100, (y2 - PAD)/imgH*100];
 }
 
 function getCanvasPos(e) {
-  const r = e.target.getBoundingClientRect();
+  const r = document.getElementById('crop-canvas').getBoundingClientRect();
   return [e.clientX - r.left, e.clientY - r.top];
 }
 
@@ -525,7 +576,7 @@ const EDGE_THRESHOLD = 8;
 
 function hitTest(mx, my) {
   const canvas = document.getElementById('crop-canvas');
-  const w = canvas.width, h = canvas.height;
+  const imgW = canvas.width - 2 * PAD, imgH = canvas.height - 2 * PAD;
   const photos = metadata.pages[currentPageIdx].photos;
 
   const order = [];
@@ -536,7 +587,7 @@ function hitTest(mx, my) {
 
   for (const i of order) {
     if (photos[i].skip) continue;
-    const [x1,y1,x2,y2] = bboxToPixels(photos[i].bbox, w, h);
+    const [x1,y1,x2,y2] = bboxToPixels(photos[i].bbox, imgW, imgH);
 
     const corners = [[x1,y1],[x2,y1],[x2,y2],[x1,y2]];
     for (let c = 0; c < corners.length; c++) {
@@ -593,6 +644,10 @@ function onCanvasMouseDown(e) {
     dragStart = [mx, my];
     dragOrigBox = [...metadata.pages[currentPageIdx].photos[selectedBox].bbox];
   }
+  if (dragMode) {
+    window.addEventListener('mousemove', onCanvasMouseMove);
+    window.addEventListener('mouseup', onCanvasMouseUp);
+  }
   drawCrop();
 }
 
@@ -605,11 +660,11 @@ function onCanvasMouseMove(e) {
     return;
   }
 
-  const w = canvas.width, h = canvas.height;
+  const imgW = canvas.width - 2 * PAD, imgH = canvas.height - 2 * PAD;
   const dx = mx - dragStart[0], dy = my - dragStart[1];
   const ob = dragOrigBox;
   const photo = metadata.pages[currentPageIdx].photos[selectedBox];
-  const pxDx = dx / w * 100, pxDy = dy / h * 100;
+  const pxDx = dx / imgW * 100, pxDy = dy / imgH * 100;
 
   if (dragMode === 'move') {
     const bw = ob[2] - ob[0], bh = ob[3] - ob[1];
@@ -640,6 +695,8 @@ function onCanvasMouseMove(e) {
 function onCanvasMouseUp() {
   if (dragMode) dirty = true;
   dragMode = null; dragHandle = -1; dragStart = null; dragOrigBox = null;
+  window.removeEventListener('mousemove', onCanvasMouseMove);
+  window.removeEventListener('mouseup', onCanvasMouseUp);
 }
 
 function onCanvasDblClick(e) {
@@ -649,9 +706,9 @@ function onCanvasDblClick(e) {
 
 function addPhoto(cx, cy) {
   const canvas = document.getElementById('crop-canvas');
-  const w = canvas.width, h = canvas.height;
+  const imgW = canvas.width - 2 * PAD, imgH = canvas.height - 2 * PAD;
   let px = 25, py = 25;
-  if (cx !== undefined) { px = cx/w*100; py = cy/h*100; }
+  if (cx !== undefined) { px = (cx - PAD)/imgW*100; py = (cy - PAD)/imgH*100; }
   const size = 15;
   const bbox = [
     Math.max(0, px - size), Math.max(0, py - size),
@@ -1004,6 +1061,7 @@ async function applyMapLocation() {
   const display = document.getElementById(`loc-display-${mapPhotoIdx}`);
   if (display) display.textContent = photo.location_name;
   dirty = true;
+  userEditedLocations.add(currentPageIdx + ':' + mapPhotoIdx);
   showLocationSuggestions(mapPhotoIdx, oldLoc, photo.location, photo.location_name);
   closeMap();
 }
@@ -1024,6 +1082,7 @@ function showLocationSuggestions(changedIdx, oldLoc, newLoc, newLocName) {
         photo.location = newLoc;
         photo.location_name = newLocName;
         dirty = true;
+        userEditedLocations.add(currentPageIdx + ':' + i);
         const display = document.getElementById(`loc-display-${i}`);
         if (display) display.textContent = newLocName;
         hint.style.display = 'none';
@@ -1105,6 +1164,50 @@ init();
 # Empty metadata generation
 # ---------------------------------------------------------------------------
 
+def _enrich_from_exif(data: dict, input_dir: Path) -> None:
+    """Fill empty date/location/caption on photos from source image EXIF."""
+    try:
+        from edit_meta import read_file_metadata
+    except ImportError:
+        return
+
+    for page in data.get("pages", []):
+        source = page.get("source")
+        if not source:
+            continue
+        # Check if any photo needs enrichment
+        photos = page.get("photos", [])
+        needs = any(
+            not p.get("date") or not p.get("location") or not p.get("caption")
+            for p in photos if not p.get("skip")
+        )
+        if not needs:
+            continue
+
+        img_path = input_dir / source
+        if not img_path.exists():
+            continue
+        try:
+            exif = read_file_metadata(str(img_path))
+        except Exception:
+            continue
+
+        exif_date = exif.get("date")
+        exif_gps = exif.get("gps")
+        exif_caption = exif.get("caption")
+        exif_location = f"{exif_gps[0]:.6f}, {exif_gps[1]:.6f}" if exif_gps else None
+
+        for photo in photos:
+            if photo.get("skip"):
+                continue
+            if not photo.get("date") and exif_date:
+                photo["date"] = exif_date
+            if not photo.get("location") and exif_location:
+                photo["location"] = exif_location
+            if not photo.get("caption") and exif_caption:
+                photo["caption"] = exif_caption
+
+
 def _generate_empty_metadata(input_dir: Path) -> dict:
     """Generate default metadata when autocrop_meta.json doesn't exist.
 
@@ -1164,13 +1267,22 @@ class EditorHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # silence default logging
 
+    def handle(self):
+        try:
+            super().handle()
+        except BrokenPipeError:
+            pass
+
     def _send(self, code: int, body: bytes, content_type: str = "text/html"):
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
 
     def _send_json(self, data: dict, code: int = 200):
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -1189,9 +1301,37 @@ class EditorHandler(BaseHTTPRequestHandler):
                 if self.meta_path.exists():
                     with open(self.meta_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
+                    _enrich_from_exif(data, self.input_dir)
                 else:
                     data = _generate_empty_metadata(self.input_dir)
                 self._send_json(data)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+
+        elif path == "/api/reverse-geocode":
+            coords = qs.get("coords", [None])[0]
+            if not coords:
+                self._send_json({"error": "missing coords"}, 400)
+                return
+            try:
+                lat, lon = [x.strip() for x in coords.split(",")]
+                params = urllib.parse.urlencode({
+                    "lat": lat, "lon": lon, "format": "json", "zoom": 10,
+                    "accept-language": "ru,en",
+                })
+                url = f"https://nominatim.openstreetmap.org/reverse?{params}"
+                req = urllib.request.Request(url, headers={"User-Agent": "autocrop-editor/1.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                addr = data.get("address", {})
+                parts = []
+                for key in ("city", "town", "village", "county", "state", "country"):
+                    if key in addr:
+                        parts.append(addr[key])
+                        if len(parts) >= 2:
+                            break
+                name = ", ".join(parts) if parts else data.get("display_name", coords)
+                self._send_json({"name": name})
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
 

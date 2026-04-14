@@ -23,7 +23,8 @@ from pathlib import Path
 
 import piexif
 
-from autocrop import IMAGE_EXTENSIONS, set_exif_metadata, set_xmp_description, _decimal_to_dms
+from ai_parse import IMAGE_EXTENSIONS
+from crop_exif import set_exif_metadata, set_xmp_description, _decimal_to_dms
 
 
 # ---------------------------------------------------------------------------

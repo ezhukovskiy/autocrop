@@ -41,6 +41,20 @@ Or use `--auto-apply` for the legacy one-shot workflow:
 python ai_parse.py ./album_pages/ -p gemini --auto-apply
 ```
 
+### Individual photos (no album pages)
+
+If your photos are already scanned or photographed one by one, skip the AI detection step and go straight to the editor:
+
+```bash
+# Step 1: Review and adjust in web editor
+python editor.py ./my_photos/
+
+# Step 2: Enhance
+python ai_enhance.py ./my_photos/cropped/ -o ./enhanced/
+```
+
+The editor will treat each image as a single full-page photo and pre-fill date, location, and caption from EXIF. You can fine-tune the crop, fix rotation, and edit metadata — then hit Apply. Originals stay untouched; results go to `cropped/`.
+
 ## `ai_parse.py` — Detect photos using AI
 
 ### Modes
@@ -120,7 +134,9 @@ python editor.py ./album_pages/
 python editor.py ./album_pages/ -o ./output/ --port 8080
 ```
 
-Works with or without `autocrop_meta.json` — if no metadata exists, each image is treated as a single full-page photo with EXIF fields pre-filled from the source file.
+Works with or without `autocrop_meta.json` — if no metadata exists, each image is treated as a single full-page photo with date, location, and caption pre-filled from the source file's EXIF. GPS coordinates are automatically resolved to place names in the background via reverse geocoding.
+
+When `autocrop_meta.json` exists but photos have empty fields, the editor also backfills date, location, and caption from the source image EXIF.
 
 Opens a web app at `http://localhost:8080` with two modes accessible via header toggle:
 
@@ -129,6 +145,7 @@ Opens a web app at `http://localhost:8080` with two modes accessible via header 
 - Drag inside a box to move it
 - Double-click to add a new photo
 - Delete key to remove selected photo (at least 1 photo per page required)
+- First photo auto-selected on page load
 
 **Edit photos** — edit photo details:
 - Preview cropped and rotated photos
@@ -249,6 +266,10 @@ All processing happens via API calls — no local GPU needed.
 | Gemini | `gemini-3-flash-preview` | `GEMINI_API_KEY` |
 
 Any model name can be passed via `-m`.
+
+## Known issues
+
+**Google Photos captions**: Captions are written as XMP `dc:description` in the JPEG file. Apple Photos correctly displays this as the photo description. However, Google Photos shows it under "Other" in the details panel instead of the description field. There doesn't appear to be a way to make Google Photos recognize XMP descriptions as captions.
 
 ## Installation
 
