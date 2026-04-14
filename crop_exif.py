@@ -275,7 +275,12 @@ def save_cropped_photos(
         location_name = photo.get("location_name")
 
         if date:
-            date_prefix = date.replace(":", "")
+            # Pad to YYYYMMDD for correct Finder sorting
+            parts = date.split(":")
+            year = parts[0] if len(parts) > 0 else "0000"
+            month = parts[1] if len(parts) > 1 else "00"
+            day = parts[2] if len(parts) > 2 else "00"
+            date_prefix = f"{year}{month}{day}"
             out_name = f"{date_prefix}_{page_stem}_photo_{i:02d}.jpg"
         else:
             out_name = f"{page_stem}_photo_{i:02d}.jpg"
