@@ -7,14 +7,15 @@ Got a stack of old photo albums? Snap a picture of each page, point this tool at
 ## How it works
 
 ```
-Album page scan ──▶ ai_parse.py ──▶ autocrop_meta.json ──▶ editor.py ──▶ crop_exif.py ──▶ ai_enhance.py
-                    (Vision AI)     (bbox + metadata)      (web editor)   (crop+EXIF)      (restore)
+Album page scan ──▶ ai_parse.py ──▶ autocrop_meta.json ──▶ editor.py ──▶ crop_exif.py ──▶ ai_enhance.py ──▶ upload_gphoto.py
+                    (Vision AI)     (bbox + metadata)      (web editor)   (crop+EXIF)      (restore)        (Google Photos)
 ```
 
 1. **`ai_parse.py`** sends each page to a Vision AI model (Gemini or GPT-4o) which returns bounding boxes, orientation, dates, locations, and captions — saved to `autocrop_meta.json`
 2. **`editor.py`** serves a web-based editor to visually review and adjust bounding boxes, rotation, dates, locations (with map), and captions
 3. **`crop_exif.py`** reads the metadata file and produces cropped photos with EXIF metadata
 4. **`ai_enhance.py`** sends each cropped photo to Gemini which restores it: removes album corners, fixes scratches, improves contrast, and colorizes B&W photos
+5. **`upload_gphoto.py`** uploads photos to Google Photos with descriptions via API
 
 ## Quick start
 
@@ -267,9 +268,46 @@ All processing happens via API calls — no local GPU needed.
 
 Any model name can be passed via `-m`.
 
-## Known issues
+## `upload_gphoto.py` — Upload to Google Photos
 
-**Google Photos captions**: Captions are written as XMP `dc:description` in the JPEG file. Apple Photos correctly displays this as the photo description. However, Google Photos shows it under "Other" in the details panel instead of the description field. There doesn't appear to be a way to make Google Photos recognize XMP descriptions as captions.
+Google Photos ignores XMP `dc:description` from EXIF when importing files directly — captions end up in the "Other" field instead of the description. Uploading via Google Photos API solves this: descriptions are set properly and visible under the photo.
+
+> **Note:** Apple Photos reads XMP descriptions correctly, so this script is only needed for Google Photos.
+
+```bash
+python upload_gphoto.py ./cropped/
+python upload_gphoto.py ./cropped/ --album "Family Album"
+python upload_gphoto.py ./cropped/ --dry-run
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--album NAME` | Create or find album and add photos to it |
+| `--credentials PATH` | Path to `credentials.json` (default: `./credentials.json`) |
+| `--token PATH` | Path to `token.json` (default: `./token.json`) |
+| `--dry-run` | List files and descriptions without uploading |
+
+### Google Cloud setup
+
+The script uses Google Photos Library API with OAuth 2.0. One-time setup:
+
+1. **Create project**: go to [console.cloud.google.com/projectcreate](https://console.cloud.google.com/projectcreate), name it anything, click Create (no billing required)
+2. **Enable API**: go to [Photos Library API](https://console.cloud.google.com/apis/library/photoslibrary.googleapis.com), click Enable
+3. **OAuth consent screen**: go to [consent screen settings](https://console.cloud.google.com/apis/credentials/consent):
+   - User type: **External**, click Create
+   - Fill in app name, support email, developer email
+   - Scopes: add `https://www.googleapis.com/auth/photoslibrary`
+   - Test users: add your Gmail address
+   - Leave the app in **Testing** status (do not publish)
+4. **Create credentials**: go to [credentials page](https://console.cloud.google.com/apis/credentials):
+   - Click **+ Create Credentials** → **OAuth client ID**
+   - Application type: **Desktop app**
+   - Click Create, then **Download JSON**
+   - Rename the file to `credentials.json` and place it in the project directory
+
+On first run, the script opens a browser for Google login. You'll see "Google hasn't verified this app" — click **Advanced** → **Go to \<app name\> (unsafe)**. After authorization, the token is saved to `token.json` and subsequent runs are automatic.
 
 ## Installation
 
